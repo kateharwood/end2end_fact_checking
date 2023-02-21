@@ -13,7 +13,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 from torch.utils.data import Dataset, DataLoader
 # from transformers import RobertaTokenizer, RobertaTokenizerFast, RobertaForSequenceClassification
 from transformers import RobertaTokenizer, RobertaModel, RobertaForSequenceClassification, get_cosine_schedule_with_warmup
-from label_model import LabelModel
+from small_label_model import LabelModel
 
 
 parser = argparse.ArgumentParser()
@@ -23,7 +23,7 @@ parser.add_argument('--dest', type=str, required=True, help='Folder to save the 
 parser.add_argument('--model', type=str, default='roberta-large')
 parser.add_argument('--epochs', type=int, default=20)
 parser.add_argument('--batch-size-gpu', type=int, default=8, help='The batch size to send through GPU')
-parser.add_argument('--batch-size-accumulated', type=int, default=256, help='The batch size for each gradient update')
+# parser.add_argument('--batch-size-accumulated', type=int, default=256, help='The batch size for each gradient update')
 
 args = parser.parse_args()
 
@@ -52,18 +52,17 @@ class FeverLabelPredictionDataset(Dataset):
         labels = {'SUPPORTS': 2, 'NOT ENOUGH INFO': 1, 'NOTENOUGHINFO': 1, 'REFUTES': 0}
 
         for j, data in enumerate(jsonlines.open(train_file)):
-            if j < 1000:
-                claim = str(data["claim"])
-                title = str(data['title'])
-                abstract = ' '.join(data['abstract'])
-                label = labels[data['label']]
+            claim = str(data["claim"])
+            title = str(data['title'])
+            abstract = ' '.join(data['abstract'])
+            label = labels[data['label']]
 
-                self.samples.append({
-                    'claim': claim,
-                    'title': title,
-                    'abstract': title + ": " + abstract,
-                    'label': label  
-                })
+            self.samples.append({
+                'claim': claim,
+                'title': title,
+                'abstract': title + ": " + abstract,
+                'label': label  
+            })
 
     def __len__(self):
         return len(self.samples)
@@ -86,11 +85,11 @@ label_model = LabelModel().to(device)
 
 optimizer = torch.optim.Adam([
     # If you are using non-roberta based models, change this to point to the right base
-    {'params': abstract_model.parameters(), 'lr': 5e-5}, # TODO use a different learning rate for the classifier layer
-    {'params': label_model.parameters(),  'lr': 1e-5}, # TODO is this right?
+    {'params': abstract_model.parameters(), 'lr': 5e-6}, # TODO use a different learning rate for the classifier layer
+    {'params': label_model.parameters(),  'lr': 1e-4}, # TODO is this right?
     # {'params': model.classifier.parameters()} #, 'lr': args.lr_linear}
 ])
-scheduler = get_cosine_schedule_with_warmup(optimizer, 0, 20)
+# scheduler = get_cosine_schedule_with_warmup(optimizer, 0, 20)
 
 
 def encode(to_encode, claim_or_abstract='claim'):
@@ -125,8 +124,6 @@ def evaluate_label_model(dataset):
     outputs = []
     with torch.no_grad():
         for batch in DataLoader(dataset, batch_size=args.batch_size_gpu):
-            print(batch['claim'])
-            print(batch['abstract'])
             encoded_claims = encode(batch['claim'], 'claim')
             encoded_abstracts = encode(batch['abstract'], 'abstract')
             claim_cls = abstract_model(**encoded_claims)[0][:,0,:]
@@ -168,7 +165,6 @@ def evaluate_abstract_model(dataset):
 
             outputs.extend(scores.argmax(dim=1).to("cpu"))
             targets.extend(torch.eye(scores.shape[0]).argmax(dim=1))
-    print(outputs)
     return {
         'macro_f1': f1_score(targets, outputs, zero_division=0, average='macro'),
         'f1': tuple(f1_score(targets, outputs, zero_division=0, average=None)),
@@ -186,6 +182,7 @@ for e in range(args.epochs):
     abstract_model.train()
     label_model.train()
     t = tqdm(DataLoader(trainset, batch_size=args.batch_size_gpu, shuffle=True))
+    epoch_loss = 0
     for i, batch in enumerate(t):
         abstract_loss = 0
         encoded_claims = []
@@ -225,10 +222,12 @@ for e in range(args.epochs):
         loss.backward()
 
         # announce loss and step gradient
-        if (i + 1) % (args.batch_size_accumulated // args.batch_size_gpu) == 0:
-            optimizer.step()
-            optimizer.zero_grad()
-            t.set_description(f'Epoch {e}, iter {i}, loss: {round(loss.item(), 4)}')
+        # if (i + 1) % (args.batch_size_accumulated // args.batch_size_gpu) == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+        t.set_description(f'Epoch {e}, iter {i}, loss: {round(loss.item(), 4)}')
+        epoch_loss = loss.item() + epoch_loss
+    print(epoch_loss)
     # scheduler.step()
 
     # Eval abstract model
